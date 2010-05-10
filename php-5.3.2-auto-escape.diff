@@ -1,0 +1,576 @@
+--- php.ini-development.orig	2009-11-05 22:29:34.000000000 +0900
++++ php.ini-development	2010-05-11 00:11:01.000000000 +0900
+@@ -914,6 +914,13 @@ default_socket_timeout = 60
+ ; http://php.net/auto-detect-line-endings
+ ;auto_detect_line_endings = Off
+ 
++;;;;;;;;;;;;;;;;;
++; Auto escaping ;
++;;;;;;;;;;;;;;;;;
++
++; Whether to enable the auto escaping.
++;__auto_escape = Off
++
+ ;;;;;;;;;;;;;;;;;;;;;;
+ ; Dynamic Extensions ;
+ ;;;;;;;;;;;;;;;;;;;;;;
+--- php.ini-production.orig	2009-11-05 22:29:34.000000000 +0900
++++ php.ini-production	2010-05-11 00:11:01.000000000 +0900
+@@ -914,6 +914,13 @@ default_socket_timeout = 60
+ ; http://php.net/auto-detect-line-endings
+ ;auto_detect_line_endings = Off
+ 
++;;;;;;;;;;;;;;;;;
++; Auto escaping ;
++;;;;;;;;;;;;;;;;;
++
++; Whether to enable the auto escaping.
++;__auto_escape = Off
++
+ ;;;;;;;;;;;;;;;;;;;;;;
+ ; Dynamic Extensions ;
+ ;;;;;;;;;;;;;;;;;;;;;;
+--- Zend/zend_compile.c.orig	2010-01-06 05:46:53.000000000 +0900
++++ Zend/zend_compile.c	2010-05-11 00:11:01.000000000 +0900
+@@ -539,6 +539,16 @@ void zend_do_echo(const znode *arg TSRML
+ }
+ /* }}} */
+ 
++void zend_do_echo_escape(znode *arg TSRMLS_DC) /* {{{ */
++{
++	zend_op *opline = get_next_op(CG(active_op_array) TSRMLS_CC);
++
++	opline->opcode = ZEND_ECHO_ESCAPE;
++	opline->op1 = *arg;
++	SET_UNUSED(opline->op2);
++}
++/* }}} */
++
+ void zend_do_abstract_method(const znode *function_name, znode *modifiers, const znode *body TSRMLS_DC) /* {{{ */
+ {
+ 	char *method_type;
+--- Zend/zend_compile.h.orig	2010-01-06 05:46:53.000000000 +0900
++++ Zend/zend_compile.h	2010-05-11 00:11:01.000000000 +0900
+@@ -387,6 +387,7 @@ void fetch_string_offset(znode *result, 
+ void zend_do_fetch_static_member(znode *result, znode *class_znode TSRMLS_DC);
+ void zend_do_print(znode *result, const znode *arg TSRMLS_DC);
+ void zend_do_echo(const znode *arg TSRMLS_DC);
++void zend_do_echo_escape(znode *arg TSRMLS_DC);
+ typedef int (*unary_op_type)(zval *, zval * TSRMLS_DC);
+ typedef int (*binary_op_type)(zval *, zval *, zval * TSRMLS_DC);
+ ZEND_API unary_op_type get_unary_op(int opcode);
+--- Zend/zend_vm_opcodes.h.orig	2010-01-06 05:46:53.000000000 +0900
++++ Zend/zend_vm_opcodes.h	2010-05-11 00:11:01.000000000 +0900
+@@ -151,5 +151,6 @@
+ #define ZEND_ISSET_ISEMPTY_PROP_OBJ          148
+ #define ZEND_HANDLE_EXCEPTION                149
+ #define ZEND_USER_OPCODE                     150
++#define ZEND_ECHO_ESCAPE                     151
+ #define ZEND_JMP_SET                         152
+ #define ZEND_DECLARE_LAMBDA_FUNCTION         153
+--- Zend/zend_vm_execute.h.orig	2010-01-06 05:46:53.000000000 +0900
++++ Zend/zend_vm_execute.h	2010-05-11 00:11:01.000000000 +0900
+@@ -1285,6 +1285,24 @@ static int ZEND_FASTCALL  ZEND_BOOL_NOT_
+ 	ZEND_VM_NEXT_OPCODE();
+ }
+ 
++static int ZEND_FASTCALL  ZEND_ECHO_ESCAPE_SPEC_CONST_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
++{
++	zend_op *opline = EX(opline);
++
++	zval z_copy;
++	zval *z = &opline->op1.u.constant;
++
++	if (Z_TYPE_P(z) == IS_OBJECT && Z_OBJ_HT_P(z)->get_method != NULL &&
++		zend_std_cast_object_tostring(z, &z_copy, IS_STRING TSRMLS_CC) == SUCCESS) {
++		zend_print_variable_escape(&z_copy);
++		zval_dtor(&z_copy);
++	} else {
++		zend_print_variable_escape(z);
++	}
++
++	ZEND_VM_NEXT_OPCODE();
++}
++
+ static int ZEND_FASTCALL  ZEND_ECHO_SPEC_CONST_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+ {
+ 	zend_op *opline = EX(opline);
+@@ -1311,7 +1329,7 @@ static int ZEND_FASTCALL  ZEND_PRINT_SPE
+ 	Z_LVAL(EX_T(opline->result.u.var).tmp_var) = 1;
+ 	Z_TYPE(EX_T(opline->result.u.var).tmp_var) = IS_LONG;
+ 
+-	return ZEND_ECHO_SPEC_CONST_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
++	return ZEND_ECHO_ESCAPE_SPEC_CONST_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+ }
+ 
+ static int ZEND_FASTCALL zend_fetch_var_address_helper_SPEC_CONST(int type, ZEND_OPCODE_HANDLER_ARGS)
+@@ -4561,6 +4579,25 @@ static int ZEND_FASTCALL  ZEND_BOOL_NOT_
+ 	ZEND_VM_NEXT_OPCODE();
+ }
+ 
++static int ZEND_FASTCALL  ZEND_ECHO_ESCAPE_SPEC_TMP_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
++{
++	zend_op *opline = EX(opline);
++	zend_free_op free_op1;
++	zval z_copy;
++	zval *z = _get_zval_ptr_tmp(&opline->op1, EX(Ts), &free_op1 TSRMLS_CC);
++
++	if (Z_TYPE_P(z) == IS_OBJECT && Z_OBJ_HT_P(z)->get_method != NULL &&
++		zend_std_cast_object_tostring(z, &z_copy, IS_STRING TSRMLS_CC) == SUCCESS) {
++		zend_print_variable_escape(&z_copy);
++		zval_dtor(&z_copy);
++	} else {
++		zend_print_variable_escape(z);
++	}
++
++	zval_dtor(free_op1.var);
++	ZEND_VM_NEXT_OPCODE();
++}
++
+ static int ZEND_FASTCALL  ZEND_ECHO_SPEC_TMP_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+ {
+ 	zend_op *opline = EX(opline);
+@@ -4588,7 +4625,7 @@ static int ZEND_FASTCALL  ZEND_PRINT_SPE
+ 	Z_LVAL(EX_T(opline->result.u.var).tmp_var) = 1;
+ 	Z_TYPE(EX_T(opline->result.u.var).tmp_var) = IS_LONG;
+ 
+-	return ZEND_ECHO_SPEC_TMP_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
++	return ZEND_ECHO_ESCAPE_SPEC_TMP_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+ }
+ 
+ static int ZEND_FASTCALL zend_fetch_var_address_helper_SPEC_TMP(int type, ZEND_OPCODE_HANDLER_ARGS)
+@@ -7803,6 +7840,25 @@ static int ZEND_FASTCALL  ZEND_POST_DEC_
+ 	ZEND_VM_NEXT_OPCODE();
+ }
+ 
++static int ZEND_FASTCALL  ZEND_ECHO_ESCAPE_SPEC_VAR_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
++{
++	zend_op *opline = EX(opline);
++	zend_free_op free_op1;
++	zval z_copy;
++	zval *z = _get_zval_ptr_var(&opline->op1, EX(Ts), &free_op1 TSRMLS_CC);
++
++	if (Z_TYPE_P(z) == IS_OBJECT && Z_OBJ_HT_P(z)->get_method != NULL &&
++		zend_std_cast_object_tostring(z, &z_copy, IS_STRING TSRMLS_CC) == SUCCESS) {
++		zend_print_variable_escape(&z_copy);
++		zval_dtor(&z_copy);
++	} else {
++		zend_print_variable_escape(z);
++	}
++
++	if (free_op1.var) {zval_ptr_dtor(&free_op1.var);};
++	ZEND_VM_NEXT_OPCODE();
++}
++
+ static int ZEND_FASTCALL  ZEND_ECHO_SPEC_VAR_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+ {
+ 	zend_op *opline = EX(opline);
+@@ -7830,7 +7886,7 @@ static int ZEND_FASTCALL  ZEND_PRINT_SPE
+ 	Z_LVAL(EX_T(opline->result.u.var).tmp_var) = 1;
+ 	Z_TYPE(EX_T(opline->result.u.var).tmp_var) = IS_LONG;
+ 
+-	return ZEND_ECHO_SPEC_VAR_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
++	return ZEND_ECHO_ESCAPE_SPEC_VAR_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+ }
+ 
+ static int ZEND_FASTCALL zend_fetch_var_address_helper_SPEC_VAR(int type, ZEND_OPCODE_HANDLER_ARGS)
+@@ -21664,6 +21720,24 @@ static int ZEND_FASTCALL  ZEND_POST_DEC_
+ 	ZEND_VM_NEXT_OPCODE();
+ }
+ 
++static int ZEND_FASTCALL  ZEND_ECHO_ESCAPE_SPEC_CV_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
++{
++	zend_op *opline = EX(opline);
++
++	zval z_copy;
++	zval *z = _get_zval_ptr_cv(&opline->op1, EX(Ts), BP_VAR_R TSRMLS_CC);
++
++	if (Z_TYPE_P(z) == IS_OBJECT && Z_OBJ_HT_P(z)->get_method != NULL &&
++		zend_std_cast_object_tostring(z, &z_copy, IS_STRING TSRMLS_CC) == SUCCESS) {
++		zend_print_variable_escape(&z_copy);
++		zval_dtor(&z_copy);
++	} else {
++		zend_print_variable_escape(z);
++	}
++
++	ZEND_VM_NEXT_OPCODE();
++}
++
+ static int ZEND_FASTCALL  ZEND_ECHO_SPEC_CV_HANDLER(ZEND_OPCODE_HANDLER_ARGS)
+ {
+ 	zend_op *opline = EX(opline);
+@@ -21690,7 +21764,7 @@ static int ZEND_FASTCALL  ZEND_PRINT_SPE
+ 	Z_LVAL(EX_T(opline->result.u.var).tmp_var) = 1;
+ 	Z_TYPE(EX_T(opline->result.u.var).tmp_var) = IS_LONG;
+ 
+-	return ZEND_ECHO_SPEC_CV_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
++	return ZEND_ECHO_ESCAPE_SPEC_CV_HANDLER(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU);
+ }
+ 
+ static int ZEND_FASTCALL zend_fetch_var_address_helper_SPEC_CV(int type, ZEND_OPCODE_HANDLER_ARGS)
+@@ -33765,31 +33839,31 @@ void zend_init_opcodes_handlers(void)
+   	ZEND_USER_OPCODE_SPEC_HANDLER,
+   	ZEND_USER_OPCODE_SPEC_HANDLER,
+   	ZEND_USER_OPCODE_SPEC_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CONST_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CONST_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CONST_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CONST_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CONST_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_TMP_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_TMP_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_TMP_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_TMP_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_TMP_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_VAR_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_VAR_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_VAR_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_VAR_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_VAR_HANDLER,
+   	ZEND_NULL_HANDLER,
+   	ZEND_NULL_HANDLER,
+   	ZEND_NULL_HANDLER,
+   	ZEND_NULL_HANDLER,
+   	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
+-  	ZEND_NULL_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CV_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CV_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CV_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CV_HANDLER,
++  	ZEND_ECHO_ESCAPE_SPEC_CV_HANDLER,
+   	ZEND_JMP_SET_SPEC_CONST_HANDLER,
+   	ZEND_JMP_SET_SPEC_CONST_HANDLER,
+   	ZEND_JMP_SET_SPEC_CONST_HANDLER,
+--- Zend/zend_language_parser.y.orig	2010-01-06 05:40:23.000000000 +0900
++++ Zend/zend_language_parser.y	2010-05-11 00:11:01.000000000 +0900
+@@ -561,8 +561,8 @@ class_constant_declaration:
+ ;
+ 
+ echo_expr_list:
+-		echo_expr_list ',' expr { zend_do_echo(&$3 TSRMLS_CC); }
+-	|	expr					{ zend_do_echo(&$1 TSRMLS_CC); }
++		echo_expr_list ',' expr { zend_do_echo_escape(&$3 TSRMLS_CC); }
++	|	expr					{ zend_do_echo_escape(&$1 TSRMLS_CC); }
+ ;
+ 
+ 
+--- Zend/zend_vm_def.h.orig	2010-01-06 05:46:53.000000000 +0900
++++ Zend/zend_vm_def.h	2010-05-11 00:11:01.000000000 +0900
+@@ -892,6 +892,25 @@ ZEND_VM_HANDLER(37, ZEND_POST_DEC, VAR|C
+ 	ZEND_VM_NEXT_OPCODE();
+ }
+ 
++ZEND_VM_HANDLER(151, ZEND_ECHO_ESCAPE, CONST|TMP|VAR|CV, ANY)
++{
++	zend_op *opline = EX(opline);
++	zend_free_op free_op1;
++	zval z_copy;
++	zval *z = GET_OP1_ZVAL_PTR(BP_VAR_R);
++
++	if (Z_TYPE_P(z) == IS_OBJECT && Z_OBJ_HT_P(z)->get_method != NULL &&
++		zend_std_cast_object_tostring(z, &z_copy, IS_STRING TSRMLS_CC) == SUCCESS) {
++		zend_print_variable_escape(&z_copy);
++		zval_dtor(&z_copy);
++	} else {
++		zend_print_variable_escape(z);
++	}
++
++	FREE_OP1();
++	ZEND_VM_NEXT_OPCODE();
++}
++
+ ZEND_VM_HANDLER(40, ZEND_ECHO, CONST|TMP|VAR|CV, ANY)
+ {
+ 	zend_op *opline = EX(opline);
+@@ -919,7 +938,7 @@ ZEND_VM_HANDLER(41, ZEND_PRINT, CONST|TM
+ 	Z_LVAL(EX_T(opline->result.u.var).tmp_var) = 1;
+ 	Z_TYPE(EX_T(opline->result.u.var).tmp_var) = IS_LONG;
+ 
+-	ZEND_VM_DISPATCH_TO_HANDLER(ZEND_ECHO);
++	ZEND_VM_DISPATCH_TO_HANDLER(ZEND_ECHO_ESCAPE);
+ }
+ 
+ ZEND_VM_HELPER_EX(zend_fetch_var_address_helper, CONST|TMP|VAR|CV, ANY, int type)
+--- Zend/zend_globals.h.orig	2010-01-06 05:46:53.000000000 +0900
++++ Zend/zend_globals.h	2010-05-11 00:11:01.000000000 +0900
+@@ -256,6 +256,7 @@ struct _zend_executor_globals {
+ 
+ 	void *saved_fpu_cw;
+ 
++	int __auto_escape;
+ 	void *reserved[ZEND_MAX_RESERVED_RESOURCES];
+ };
+ 
+--- Zend/zend.c.orig	2010-01-06 05:46:53.000000000 +0900
++++ Zend/zend.c	2010-05-11 00:11:01.000000000 +0900
+@@ -88,9 +88,21 @@ static ZEND_INI_MH(OnUpdateGCEnabled) /*
+ }
+ /* }}} */
+ 
++static ZEND_INI_MH(OnUpdateAutoEscape) /* {{{ */
++{
++	if (!new_value) {
++		EG(__auto_escape) = 0;
++	} else {
++		EG(__auto_escape) = atoi(new_value);
++	}
++	return SUCCESS;
++}
++/* }}} */
++
+ ZEND_INI_BEGIN()
+ 	ZEND_INI_ENTRY("error_reporting",				NULL,		ZEND_INI_ALL,		OnUpdateErrorReporting)
+ 	STD_ZEND_INI_BOOLEAN("zend.enable_gc",				"1",	ZEND_INI_ALL,		OnUpdateGCEnabled,      gc_enabled,     zend_gc_globals,        gc_globals)
++	ZEND_INI_ENTRY("__auto_escape",			NULL,		ZEND_INI_ALL,		OnUpdateAutoEscape)
+ #ifdef ZEND_MULTIBYTE
+  	STD_ZEND_INI_BOOLEAN("detect_unicode", "1", ZEND_INI_ALL, OnUpdateBool, detect_unicode, zend_compiler_globals, compiler_globals)
+ #endif
+@@ -315,6 +327,73 @@ ZEND_API int zend_print_zval_ex(zend_wri
+ }
+ /* }}} */
+ 
++static int escape_write(const char *str, size_t len) /* {{{ */
++{
++	int rv;
++	zval htmlspecialchars, arg, quote_type;
++	zval *argp, *quote_type_p, *retval;
++	zval **params[2];
++
++	INIT_ZVAL(htmlspecialchars);
++	ZVAL_STRING(&htmlspecialchars, "htmlspecialchars", 0);
++
++	INIT_ZVAL(arg);
++	argp = &arg;
++	ZVAL_STRINGL(argp, str, len, 0);
++
++	INIT_ZVAL(quote_type);
++	quote_type_p = &quote_type;
++	ZVAL_LONG(quote_type_p, 3);	/* ENT_QUOTES */
++
++	params[0] = &argp;
++	params[1] = &quote_type_p;
++	if (call_user_function_ex(CG(function_table), NULL, &htmlspecialchars, &retval, 2, params, 0, NULL TSRMLS_CC) == SUCCESS) {
++		zend_write(Z_STRVAL_P(retval), Z_STRLEN_P(retval));
++		rv = Z_STRLEN_P(retval);
++	} else {
++		zend_error(E_ERROR, "htmlspecialchars failed");
++		rv = 0;
++	}
++
++	if (retval) {
++		zval_ptr_dtor(&retval);
++	}
++	return rv;
++}
++/* }}} */
++
++ZEND_API int zend_print_zval_escape(zval *expr, int indent) /* {{{ */
++{
++	zval expr_copy;
++	int use_copy;
++	int ret, n;
++	char *p, *q, *end;
++
++	zend_make_printable_zval(expr, &expr_copy, &use_copy);
++	if (use_copy) {
++		expr = &expr_copy;
++	}
++	if (expr->value.str.len==0) { /* optimize away empty strings */
++		if (use_copy) {
++			zval_dtor(expr);
++		}
++		return 0;
++	}
++
++	if (EG(__auto_escape)) {
++		ret = escape_write(Z_STRVAL_P(expr), Z_STRLEN_P(expr));
++	} else {
++		zend_write(expr->value.str.val, expr->value.str.len);
++		ret = expr->value.str.len;
++	}
++
++	if (use_copy) {
++		zval_dtor(expr);
++	}
++	return ret;
++}
++/* }}} */
++
+ ZEND_API void zend_print_flat_zval_r(zval *expr TSRMLS_DC) /* {{{ */
+ {
+ 	switch (Z_TYPE_P(expr)) {
+--- Zend/zend_builtin_functions.c.orig	2010-01-26 08:41:18.000000000 +0900
++++ Zend/zend_builtin_functions.c	2010-05-11 00:11:01.000000000 +0900
+@@ -90,6 +90,8 @@ static ZEND_FUNCTION(gc_collect_cycles);
+ static ZEND_FUNCTION(gc_enabled);
+ static ZEND_FUNCTION(gc_enable);
+ static ZEND_FUNCTION(gc_disable);
++static ZEND_FUNCTION(__auto_escape);
++static ZEND_FUNCTION(__safe);
+ 
+ /* {{{ arginfo */
+ ZEND_BEGIN_ARG_INFO(arginfo_zend__void, 0)
+@@ -282,6 +284,8 @@ static const zend_function_entry builtin
+ 	ZEND_FE(gc_enabled, 		arginfo_zend__void)
+ 	ZEND_FE(gc_enable, 			arginfo_zend__void)
+ 	ZEND_FE(gc_disable, 		arginfo_zend__void)
++	ZEND_FE(__auto_escape,	NULL)
++	ZEND_FE(__safe,			NULL)
+ 	{ NULL, NULL, NULL }
+ };
+ /* }}} */
+@@ -2331,6 +2335,39 @@ ZEND_FUNCTION(get_extension_funcs)
+ }
+ /* }}} */
+ 
++/* {{{ proto int __auto_escape(int new_error_level=null)
++   Return the current __auto_escape value, and if an argument was passed - change to the value */
++ZEND_FUNCTION(__auto_escape)
++{
++	char *new_value;
++	int new_value_len;
++	int old_auto_escape;
++
++	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|s", &new_value, &new_value_len) == FAILURE) {
++		RETURN_FALSE;
++	}
++
++	old_auto_escape = EG(__auto_escape);
++	if (ZEND_NUM_ARGS() > 0) {
++		zend_alter_ini_entry_ex("__auto_escape", sizeof("__auto_escape"), new_value, new_value_len, ZEND_INI_USER, ZEND_INI_STAGE_RUNTIME, 0 TSRMLS_CC);
++	}
++	RETVAL_LONG(old_auto_escape);
++}
++/* }}} */
++
++/* {{{ proto string __safe(variable)
++   echo a variable without auto escaping */
++ZEND_FUNCTION(__safe)
++{
++	zval *value;
++
++	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &value) == FAILURE) {
++		ZEND_WRONG_PARAM_COUNT();
++	}
++	zend_print_variable(value);
++}
++/* }}} */
++
+ /*
+  * Local variables:
+  * tab-width: 4
+--- Zend/zend_variables.h.orig	2010-02-04 03:07:25.000000000 +0900
++++ Zend/zend_variables.h	2010-05-11 00:11:01.000000000 +0900
+@@ -47,6 +47,7 @@ static inline void _zval_copy_ctor(zval 
+ 
+ 
+ ZEND_API int zend_print_variable(zval *var);
++ZEND_API int zend_print_variable_escape(zval *var);
+ ZEND_API void _zval_ptr_dtor(zval **zval_ptr ZEND_FILE_LINE_DC);
+ ZEND_API void _zval_internal_dtor(zval *zvalue ZEND_FILE_LINE_DC);
+ ZEND_API void _zval_internal_ptr_dtor(zval **zvalue ZEND_FILE_LINE_DC);
+--- Zend/zend_variables.c.orig	2010-02-04 03:07:25.000000000 +0900
++++ Zend/zend_variables.c	2010-05-11 00:11:01.000000000 +0900
+@@ -160,6 +160,12 @@ ZEND_API void _zval_dtor_wrapper(zval *z
+ }
+ 
+ 
++ZEND_API int zend_print_variable_escape(zval *var) /* {{{ */
++{
++	return zend_print_zval_escape(var, 0);
++}
++/* }}} */
++
+ #if ZEND_DEBUG
+ ZEND_API void _zval_copy_ctor_wrapper(zval *zvalue)
+ {
+--- ext/standard/formatted_print.c.orig	2010-01-03 18:23:27.000000000 +0900
++++ ext/standard/formatted_print.c	2010-05-11 00:11:01.000000000 +0900
+@@ -692,6 +692,42 @@ PHP_FUNCTION(vsprintf)
+ }
+ /* }}} */
+ 
++/* {{{ proto static int escape_write(char *s, int len)
++   Helper function for output string with esaping html entities */
++static int
++escape_write(char *s, int len)
++{
++	int rlen;
++	zval *argp, *quote_type_p, *retval;
++	zval **params[2];
++	zval htmlspecialchars, arg, quote_type;
++
++	INIT_ZVAL(htmlspecialchars);
++	ZVAL_STRING(&htmlspecialchars, "htmlspecialchars", 0);
++
++	INIT_ZVAL(arg);
++	INIT_ZVAL(quote_type);
++	argp = &arg;
++	ZVAL_STRINGL(argp, s, len, 0);
++	quote_type_p = &quote_type;
++	ZVAL_LONG(quote_type_p, 3);		/* ENT_QUOTES */
++
++	params[0] = &argp;
++	params[1] = &quote_type_p;
++	if (call_user_function_ex(CG(function_table), NULL, &htmlspecialchars, &retval, 2, params, 0, NULL TSRMLS_CC) == SUCCESS) {
++		rlen = PHPWRITE(Z_STRVAL_P(retval), Z_STRLEN_P(retval));
++	} else {
++		zend_error(E_ERROR, "htmlspecialchars failed");
++		rlen = 0;
++	}
++
++	if (retval) {
++		zval_ptr_dtor(&retval);
++	}
++	return rlen;
++}
++/* }}} */
++
+ /* {{{ proto int printf(string format [, mixed arg1 [, mixed ...]])
+    Output a formatted string */
+ PHP_FUNCTION(user_printf)
+@@ -702,7 +738,11 @@ PHP_FUNCTION(user_printf)
+ 	if ((result=php_formatted_print(ht, &len, 0, 0 TSRMLS_CC))==NULL) {
+ 		RETURN_FALSE;
+ 	}
+-	rlen = PHPWRITE(result, len);
++	if (EG(__auto_escape)) {
++		rlen = escape_write(result, len);
++	} else {
++		rlen = PHPWRITE(result, len);
++	}
+ 	efree(result);
+ 	RETURN_LONG(rlen);
+ }
+@@ -718,7 +758,11 @@ PHP_FUNCTION(vprintf)
+ 	if ((result=php_formatted_print(ht, &len, 1, 0 TSRMLS_CC))==NULL) {
+ 		RETURN_FALSE;
+ 	}
+-	rlen = PHPWRITE(result, len);
++	if (EG(__auto_escape)) {
++		rlen = escape_write(result, len);
++	} else {
++		rlen = PHPWRITE(result, len);
++	}
+ 	efree(result);
+ 	RETURN_LONG(rlen);
+ }
