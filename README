@@ -2,7 +2,7 @@ README for php-auto-escape patch
 ********************************
 
 This is a patch for PHP that enables auto escaping mode for
-echo, print, printf and vprintf functions.
+echo, print, printf, vprintf functions and <?= ?> shorttag.
 
 Installation
 ============
@@ -37,7 +37,7 @@ This patch add __auto_escape and __safe function to PHP Zend core.
 
 Use __auto_escape function to enable/disable auto escaping feature.
 The patched PHP apply htmlspecialchars(ENT_QUOTES) to all
-outputs via echo, print, printf and vprintf.
+outputs via echo, print, printf, vprintf and <?= ?> shorttag.
 
 	<?php
 	// Enable auto escaping
